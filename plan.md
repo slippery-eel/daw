@@ -9,17 +9,17 @@ Canvas-based piano roll (C2–B5, 48 rows × 16th-note grid). Click to place/rem
 
 ---
 
-## v1.1 — Waveform Selector
+## v1.1 — Waveform Selector ✅
 Add a waveform button group in the transport bar: **Sine / Square / Triangle / Saw**. The selected waveform is used for all new note playback. Reuse `oscillator()` waveform logic from `../Vocoder/index.html`.
 
 ---
 
-## v1.2 — ADSR Envelope
+## v1.2 — ADSR Envelope ✅
 Add Attack, Decay, Sustain, Release sliders in the transport bar (or a collapsible panel). Apply to each note's `GainNode` automation. Default: A=5ms, D=80ms, S=0.7, R=60ms.
 
 ---
 
-## v1.3 — Grid Resolution + Zoom
+## v1.3 — Grid Resolution + Zoom ✅
 Add a resolution selector: **1/4 / 1/8 / 1/16 / 1/32** note grid (changes `COL_W` and `CELL_BEATS`). Add a horizontal zoom slider that scales `COL_W` without changing the musical grid.
 
 ---
@@ -54,7 +54,7 @@ Per-track `WaveShaperNode` with a tanh-based curve. Port the grit curve generati
 
 ---
 
-## v4.0 — WAV Export
+## v4.0 — WAV Export ✅ *(implemented early)*
 "Export WAV" button in the transport. Uses `OfflineAudioContext` to render the full pattern at 44100 Hz. Reconstructs all tracks and effects offline. Encodes to 16-bit PCM WAV using `encodeWAV()` ported from `../Vocoder/index.html`. Download as `daw-export.wav`.
 
 ---
