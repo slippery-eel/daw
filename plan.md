@@ -24,7 +24,7 @@ Add a resolution selector: **1/4 / 1/8 / 1/16 / 1/32** note grid (changes `COL_W
 
 ---
 
-## v2.0 — Multiple Tracks
+## v2.0 — Multiple Tracks ✅
 Stack 3 independent tracks, each with its own piano roll canvas, mute button, solo button, and volume knob. Tracks play simultaneously. Transport Play/Stop controls all tracks in sync.
 
 ---

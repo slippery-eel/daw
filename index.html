@@ -28,7 +28,7 @@ body { display: flex; flex-direction: column; height: 100dvh; }
   flex-shrink: 0;
 }
 .tgroup { display: flex; align-items: center; gap: 7px; }
-.tdiv   { width: 1px; height: 22px; background: var(--border); }
+.tdiv   { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
 .tlabel { color: var(--muted); font-size: 10px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.07em; }
 
@@ -51,8 +51,7 @@ input[type="range"] {
   background: var(--border); outline: none; cursor: pointer;
 }
 input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 13px; height: 13px; border-radius: 50%;
+  -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
   background: var(--accent); cursor: pointer;
 }
 input[type="range"]::-moz-range-thumb {
@@ -77,9 +76,76 @@ select:focus { outline: 1px solid var(--accent); }
 .adsr-val   { color: var(--accent); font-size: 10px; font-variant-numeric: tabular-nums;
   min-width: 36px; }
 
-/* ── Piano roll ── */
-.roll-wrap { flex: 1; overflow: auto; position: relative; }
-#roll { display: block; cursor: crosshair; }
+/* ── Tracks ── */
+.tracks-container {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  display: flex; flex-direction: column;
+}
+
+.track-row {
+  display: flex; flex-direction: row; flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.track-head {
+  width: 148px; flex-shrink: 0;
+  background: var(--surface);
+  border-right: 2px solid var(--border);
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 7px;
+  cursor: pointer; user-select: none;
+  transition: border-right-color .15s;
+}
+.track-row.active .track-head { border-right-color: var(--track-color, var(--accent)); }
+
+.track-name {
+  font-size: 12px; font-weight: 600; color: var(--text);
+}
+
+.track-btns { display: flex; gap: 5px; }
+
+.tbtn {
+  padding: 3px 9px; font-size: 11px; border-radius: 4px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer; font-family: inherit;
+  transition: all .15s;
+}
+.tbtn:hover { border-color: var(--accent); color: var(--accent); }
+.tbtn.muted  { border-color: rgba(255,80,80,.5); color: #ff5050; background: rgba(255,80,80,.1); }
+.tbtn.soloed { border-color: rgba(255,200,0,.5); color: #ffc800; background: rgba(255,200,0,.1); }
+
+.track-vol-row { display: flex; align-items: center; gap: 5px; }
+.track-vol-row input[type="range"] { width: 70px; }
+.vol-val { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; min-width: 28px; }
+
+.roll-wrap {
+  flex: 1; overflow: auto;
+  height: 208px; /* updated dynamically by rowH */
+}
+
+canvas.roll { display: block; cursor: crosshair; }
+
+/* ── Per-track vertical zoom (custom drag) ── */
+.zoom-col {
+  width: 28px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border-left: 1px solid var(--border);
+  cursor: ns-resize; user-select: none;
+}
+.zoom-groove {
+  width: 3px; height: calc(100% - 20px);
+  background: var(--border); border-radius: 2px;
+  position: relative; flex-shrink: 0;
+}
+.zoom-thumb {
+  width: 14px; height: 14px;
+  background: var(--accent); border-radius: 50%;
+  position: absolute; left: 50%; transform: translateX(-50%) translateY(-50%);
+  box-shadow: 0 0 7px rgba(0,229,255,.45);
+  transition: box-shadow .1s;
+  top: 50%; /* updated dynamically */
+}
+.zoom-thumb:hover { box-shadow: 0 0 14px rgba(0,229,255,.7); }
 </style>
 </head>
 <body>
@@ -166,106 +232,250 @@ select:focus { outline: 1px solid var(--accent); }
   </div>
 </div>
 
-<div class="roll-wrap">
-  <canvas id="roll"></canvas>
-</div>
+<div class="tracks-container" id="tracks-container"></div>
 
 <script>
 'use strict';
 
 // ── Layout ────────────────────────────────────────────────────────────────────
-const KEYS_W      = 64;   // piano key column width
-const RULER_H     = 26;   // timeline ruler height
-const ROW_H       = 18;   // px per semitone row
-const BASE_COL_W  = 30;   // px per column at zoom 1×
-const PITCH_HI    = 83;   // B5 (top row)
-const PITCH_LO    = 36;   // C2 (bottom row)
-const NUM_ROWS    = PITCH_HI - PITCH_LO + 1; // 48
-const BLACK_KEYS  = new Set([1, 3, 6, 8, 10]);
+const KEYS_W     = 64;
+const RULER_H    = 26;
+const ROW_H      = 18;
+const BASE_COL_W = 30;
+const PITCH_HI   = 83;  // B5
+const PITCH_LO   = 36;  // C2
+const NUM_ROWS   = PITCH_HI - PITCH_LO + 1;
+const BLACK_KEYS = new Set([1, 3, 6, 8, 10]);
+
+const NUM_TRACKS    = 3;
+const TRACK_NAMES   = ['Track 1', 'Track 2', 'Track 3'];
+const TRACK_COLORS  = ['#00e5ff', '#ff6b6b', '#69ff94'];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
-  notes: [],
-  bpm:        120,
-  bars:       2,
-  resolution: 16,   // grid subdivisions per bar: 4=quarter, 8=eighth, 16=sixteenth, 32=thirty-second
-  zoom:       1.0,  // column width multiplier
-  waveform:   'sine',
-  attack:     5,
-  decay:      80,
-  sustain:    0.7,
-  release:    60,
-  playing:    false,
-  looping:    true,
+  tracks: Array.from({ length: NUM_TRACKS }, (_, i) => ({
+    name:   TRACK_NAMES[i],
+    notes:  [],
+    mute:   false,
+    solo:   false,
+    volume: 1.0,
+    rowH:   18,   // px per pitch row — vertical zoom (8–40); track container height stays fixed
+  })),
+  activeTrack: 0,
+  bpm:         120,
+  bars:        2,
+  resolution:  16,
+  zoom:        1.0,
+  waveform:    'sine',
+  attack:      5,
+  decay:       80,
+  sustain:     0.7,
+  release:     60,
+  playing:     false,
+  looping:     true,
   currentBeat: 0,
 };
 
-function colWidth()    { return Math.max(8, Math.round(BASE_COL_W * state.zoom)); }
-function cellBeats()   { return 4 / state.resolution; }  // beats per grid cell
-function totalBeats()  { return state.bars * 4; }
-function numCols()     { return state.bars * state.resolution; }
-function secPerBeat()     { return 60 / state.bpm; }
-function patternSec()     { return totalBeats() * secPerBeat(); }
-function isBlackKey(p)    { return BLACK_KEYS.has(p % 12); }
-function pitchToRow(p)    { return PITCH_HI - p; }
-function rowToPitch(r)    { return PITCH_HI - r; }
-function midiToHz(m)      { return 440 * Math.pow(2, (m - 69) / 12); }
+function colWidth()   { return Math.max(8, Math.round(BASE_COL_W * state.zoom)); }
+function cellBeats()  { return 4 / state.resolution; }
+function totalBeats() { return state.bars * 4; }
+function numCols()    { return state.bars * state.resolution; }
+function secPerBeat() { return 60 / state.bpm; }
+function patternSec() { return totalBeats() * secPerBeat(); }
+function isBlackKey(p){ return BLACK_KEYS.has(p % 12); }
+function pitchToRow(p){ return PITCH_HI - p; }
+function rowToPitch(r){ return PITCH_HI - r; }
+function midiToHz(m)  { return 440 * Math.pow(2, (m - 69) / 12); }
 
-// ── Canvas ────────────────────────────────────────────────────────────────────
-const canvas = document.getElementById('roll');
-const ctx    = canvas.getContext('2d');
+// ── Track DOM elements ────────────────────────────────────────────────────────
+const trackEls = []; // [{row, head, canvas, ctx, wrap}]
 
-function resizeCanvas() {
-  canvas.width  = KEYS_W + numCols() * colWidth();
-  canvas.height = RULER_H + NUM_ROWS * ROW_H;
-  canvas.style.width  = canvas.width  + 'px';
-  canvas.style.height = canvas.height + 'px';
+function buildTrackUI() {
+  const container = document.getElementById('tracks-container');
+
+  state.tracks.forEach((track, ti) => {
+    const color = TRACK_COLORS[ti];
+
+    const row = document.createElement('div');
+    row.className = 'track-row' + (ti === 0 ? ' active' : '');
+    row.style.setProperty('--track-color', color);
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    const head = document.createElement('div');
+    head.className = 'track-head';
+    head.innerHTML = `
+      <div class="track-name" style="color:${color}">${track.name}</div>
+      <div class="track-btns">
+        <button class="tbtn mute-btn">M</button>
+        <button class="tbtn solo-btn">S</button>
+      </div>
+      <div class="track-vol-row">
+        <span class="adsr-lbl" style="color:var(--muted)">Vol</span>
+        <input type="range" class="track-vol" min="0" max="1" step="0.01" value="1">
+        <span class="vol-val">1.00</span>
+      </div>`;
+
+    head.addEventListener('click', () => setActiveTrack(ti));
+
+    const muteBtn = head.querySelector('.mute-btn');
+    muteBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      track.mute = !track.mute;
+      muteBtn.classList.toggle('muted', track.mute);
+    });
+
+    const soloBtn = head.querySelector('.solo-btn');
+    soloBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      track.solo = !track.solo;
+      soloBtn.classList.toggle('soloed', track.solo);
+    });
+
+    const volSlider = head.querySelector('.track-vol');
+    const volVal    = head.querySelector('.vol-val');
+    volSlider.addEventListener('input', e => {
+      track.volume = +e.target.value;
+      volVal.textContent = track.volume.toFixed(2);
+      if (trackGains[ti]) trackGains[ti].gain.value = track.volume;
+    });
+
+    // ── Canvas wrapper ───────────────────────────────────────────────────────
+    const wrap = document.createElement('div');
+    wrap.className = 'roll-wrap';
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'roll';
+
+    // ── Vertical zoom (custom drag) ──────────────────────────────────────────
+    const zoomCol  = document.createElement('div');
+    zoomCol.className = 'zoom-col';
+    zoomCol.title = 'Drag to zoom pitch rows';
+
+    const groove = document.createElement('div');
+    groove.className = 'zoom-groove';
+
+    const thumb = document.createElement('div');
+    thumb.className = 'zoom-thumb';
+    groove.appendChild(thumb);
+    zoomCol.appendChild(groove);
+
+    const ZOOM_MIN = 8, ZOOM_MAX = 40;
+
+    function setThumb() {
+      // thumb top %: 0% = max zoom (top), 100% = min zoom (bottom)
+      const pct = 1 - (track.rowH - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN);
+      thumb.style.top = (pct * 100) + '%';
+    }
+    setThumb();
+
+    let zDragging = false, zStartY = 0, zStartRowH = track.rowH;
+
+    zoomCol.addEventListener('mousedown', e => {
+      zDragging  = true;
+      zStartY    = e.clientY;
+      zStartRowH = track.rowH;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!zDragging) return;
+      const grooveH = groove.getBoundingClientRect().height || 1;
+      const dy      = zStartY - e.clientY; // up = positive = zoom in
+      const delta   = Math.round((dy / grooveH) * (ZOOM_MAX - ZOOM_MIN));
+      track.rowH    = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zStartRowH + delta));
+      setThumb();
+      resizeTrack(ti);
+      scrollToC4(ti);
+      drawTrack(ti);
+    });
+
+    document.addEventListener('mouseup', () => { zDragging = false; });
+
+    wrap.appendChild(canvas);
+    row.appendChild(head);
+    row.appendChild(wrap);
+    row.appendChild(zoomCol);
+    container.appendChild(row);
+
+    const ctx = canvas.getContext('2d');
+    trackEls[ti] = { row, head, canvas, ctx, wrap };
+
+    addTrackEvents(ti);
+  });
+}
+
+function setActiveTrack(ti) {
+  state.activeTrack = ti;
+  trackEls.forEach(({ row }, i) => row.classList.toggle('active', i === ti));
+}
+
+// ── Canvas sizing ─────────────────────────────────────────────────────────────
+function resizeTrack(ti) {
+  const { canvas } = trackEls[ti];
+  const rowH = state.tracks[ti].rowH;
+  const W = KEYS_W + numCols() * colWidth();
+  const H = RULER_H + NUM_ROWS * rowH;
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  // wrap height is fixed in CSS — only the canvas inside scales
+}
+
+function resizeAll() {
+  trackEls.forEach((_, ti) => resizeTrack(ti));
+}
+
+function scrollToC4(ti) {
+  const rowH  = state.tracks[ti].rowH;
+  const C4row = PITCH_HI - 60;
+  trackEls[ti].wrap.scrollTop = Math.max(0, RULER_H + C4row * rowH - 40);
+}
+
+function initScroll() {
+  trackEls.forEach((_, ti) => scrollToC4(ti));
 }
 
 // ── Draw ──────────────────────────────────────────────────────────────────────
-function drawGrid() {
-  const W = canvas.width, H = canvas.height;
+function drawGrid(ctx, canvas, rowH) {
+  const W  = canvas.width, H = canvas.height;
   const nc = numCols();
-
-  ctx.fillStyle = '#080b12';
-  ctx.fillRect(0, 0, W, H);
-
   const CW = colWidth();
   const colsPerBar  = state.resolution;
   const colsPerBeat = state.resolution / 4;
+
+  ctx.fillStyle = '#080b12';
+  ctx.fillRect(0, 0, W, H);
 
   // Black-key row tint
   for (let r = 0; r < NUM_ROWS; r++) {
     if (isBlackKey(rowToPitch(r))) {
       ctx.fillStyle = 'rgba(0,0,0,.28)';
-      ctx.fillRect(KEYS_W, RULER_H + r * ROW_H, nc * CW, ROW_H);
+      ctx.fillRect(KEYS_W, RULER_H + r * rowH, nc * CW, rowH);
     }
   }
 
-  // Vertical lines (columns)
+  // Vertical lines
   for (let c = 0; c <= nc; c++) {
-    const x      = KEYS_W + c * CW;
-    const isBar  = c % colsPerBar  === 0;
-    const isBeat = c % colsPerBeat === 0;
+    const x     = KEYS_W + c * CW;
+    const isBar = c % colsPerBar  === 0;
+    const isBeat= c % colsPerBeat === 0;
     ctx.strokeStyle = isBar ? '#2a4060' : isBeat ? '#1e3050' : '#13213a';
     ctx.lineWidth   = isBar ? 1.5 : 1;
     ctx.beginPath(); ctx.moveTo(x, RULER_H); ctx.lineTo(x, H); ctx.stroke();
   }
 
-  // Horizontal lines (rows)
+  // Horizontal lines
   ctx.strokeStyle = '#13213a'; ctx.lineWidth = 1;
   for (let r = 0; r <= NUM_ROWS; r++) {
-    const y = RULER_H + r * ROW_H;
+    const y = RULER_H + r * rowH;
     ctx.beginPath(); ctx.moveTo(KEYS_W, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
-  // Ruler background
+  // Ruler
   ctx.fillStyle = '#0f1520';
   ctx.fillRect(0, 0, W, RULER_H);
   ctx.strokeStyle = '#1a2535'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(0, RULER_H); ctx.lineTo(W, RULER_H); ctx.stroke();
 
-  // Ruler labels & tick marks
   for (let c = 0; c <= nc; c++) {
     const isBar  = c % colsPerBar  === 0;
     const isBeat = c % colsPerBeat === 0;
@@ -273,41 +483,36 @@ function drawGrid() {
     const x    = KEYS_W + c * CW;
     const bar  = Math.floor(c / colsPerBar) + 1;
     const beat = Math.floor((c % colsPerBar) / colsPerBeat) + 1;
-    ctx.strokeStyle = isBar ? '#2a4060' : '#1e3050';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = isBar ? '#2a4060' : '#1e3050'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, isBar ? 0 : RULER_H - 7); ctx.lineTo(x, RULER_H); ctx.stroke();
     if (isBar) {
-      ctx.fillStyle = '#00e5ff';
-      ctx.font = 'bold 11px monospace';
+      ctx.fillStyle = '#00e5ff'; ctx.font = 'bold 11px monospace';
       ctx.fillText(`${bar}`, x + 3, RULER_H - 6);
     } else {
-      ctx.fillStyle = '#4a6075';
-      ctx.font = '9px monospace';
+      ctx.fillStyle = '#4a6075'; ctx.font = '9px monospace';
       ctx.fillText(`.${beat}`, x + 2, RULER_H - 5);
     }
   }
 
-  // Piano key column
+  // Piano keys column
   ctx.fillStyle = '#0f1520';
-  ctx.fillRect(0, RULER_H, KEYS_W, NUM_ROWS * ROW_H);
+  ctx.fillRect(0, RULER_H, KEYS_W, NUM_ROWS * rowH);
   ctx.strokeStyle = '#1a2535'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(KEYS_W, RULER_H); ctx.lineTo(KEYS_W, H); ctx.stroke();
 
   for (let r = 0; r < NUM_ROWS; r++) {
     const pitch = rowToPitch(r);
-    const y = RULER_H + r * ROW_H;
-    const note = pitch % 12;
+    const y     = RULER_H + r * rowH;
     if (isBlackKey(pitch)) {
       ctx.fillStyle = '#060a10';
-      ctx.fillRect(2, y + 1, Math.floor(KEYS_W * 0.62), ROW_H - 1);
+      ctx.fillRect(2, y + 1, Math.floor(KEYS_W * 0.62), rowH - 1);
     } else {
       ctx.fillStyle = '#1c2d40';
-      ctx.fillRect(2, y + 1, KEYS_W - 3, ROW_H - 1);
-      if (note === 0) {
+      ctx.fillRect(2, y + 1, KEYS_W - 3, rowH - 1);
+      if (pitch % 12 === 0) {
         const oct = Math.floor(pitch / 12) - 1;
-        ctx.fillStyle = '#6ab0d4';
-        ctx.font = 'bold 8px sans-serif';
-        ctx.fillText(`C${oct}`, KEYS_W - 22, y + ROW_H - 4);
+        ctx.fillStyle = '#6ab0d4'; ctx.font = 'bold 8px sans-serif';
+        ctx.fillText(`C${oct}`, KEYS_W - 22, y + rowH - 4);
       }
     }
   }
@@ -315,75 +520,69 @@ function drawGrid() {
   // Corner cap
   ctx.fillStyle = '#0f1520';
   ctx.fillRect(0, 0, KEYS_W, RULER_H);
-  ctx.strokeStyle = '#1a2535';
-  ctx.strokeRect(0, 0, KEYS_W, RULER_H);
+  ctx.strokeStyle = '#1a2535'; ctx.strokeRect(0, 0, KEYS_W, RULER_H);
 }
 
-function drawNotes() {
-  state.notes.forEach(n => {
+function drawNotes(ctx, notes, color, rowH) {
+  const CW = colWidth();
+  const CB = cellBeats();
+  notes.forEach(n => {
     const row = pitchToRow(n.pitch);
-    const CW  = colWidth();
-    const x   = KEYS_W + (n.start / cellBeats()) * CW + 1;
-    const y   = RULER_H + row * ROW_H + 1;
-    const w   = (n.duration / cellBeats()) * CW - 2;
-    const h   = ROW_H - 2;
-
-    // Body fill
-    ctx.fillStyle = 'rgba(0,229,255,0.15)';
+    const x   = KEYS_W + (n.start / CB) * CW + 1;
+    const y   = RULER_H + row * rowH + 1;
+    const w   = (n.duration / CB) * CW - 2;
+    const h   = rowH - 2;
+    ctx.fillStyle = color + '26';
     ctx.fillRect(x, y, w, h);
-    // Left accent bar
-    ctx.fillStyle = '#00e5ff';
+    ctx.fillStyle = color;
     ctx.fillRect(x, y, Math.min(3, w), h);
-    // Border
-    ctx.strokeStyle = 'rgba(0,200,224,0.7)';
+    ctx.strokeStyle = color + 'b3';
     ctx.lineWidth = 1;
     ctx.strokeRect(x, y, w, h);
   });
 }
 
-function drawCursor() {
+function drawCursor(ctx, canvas) {
   if (!state.playing) return;
   const x = KEYS_W + (state.currentBeat / cellBeats()) * colWidth();
   ctx.save();
-  ctx.strokeStyle = '#ff9f00';
-  ctx.lineWidth   = 2;
-  ctx.shadowColor = '#ff9f00';
-  ctx.shadowBlur  = 10;
+  ctx.strokeStyle = '#ff9f00'; ctx.lineWidth = 2;
+  ctx.shadowColor = '#ff9f00'; ctx.shadowBlur  = 10;
   ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
   ctx.restore();
 }
 
-function drawAll() { drawGrid(); drawNotes(); drawCursor(); }
+function drawTrack(ti) {
+  const { ctx, canvas } = trackEls[ti];
+  const rowH = state.tracks[ti].rowH;
+  drawGrid(ctx, canvas, rowH);
+  drawNotes(ctx, state.tracks[ti].notes, TRACK_COLORS[ti], rowH);
+  drawCursor(ctx, canvas);
+}
+
+function drawAllTracks() {
+  trackEls.forEach((_, ti) => drawTrack(ti));
+}
 
 // ── Animation loop ────────────────────────────────────────────────────────────
 function animLoop() {
-  drawAll();
+  drawAllTracks();
   if (state.playing) requestAnimationFrame(animLoop);
 }
 
 // ── Audio engine ──────────────────────────────────────────────────────────────
 let audioCtx = null, masterGain = null;
+let trackGains = [];
 let schedulerTimer = null, playStartTime = 0;
-const scheduled = new Set(); // "noteIdx:loopIdx" keys
+const scheduled = new Set();
 
-// Builds: masterGain → DynamicsCompressor → destination.
-// Returns the masterGain node that note voices should connect to.
-// Shared by both the live AudioContext and OfflineAudioContext for export.
-function buildOutputChain(ctx, destination) {
-  const gain = ctx.createGain();
+function buildOutputChain(actx, destination) {
+  const gain = actx.createGain();
   gain.gain.value = 0.6;
-
-  // Gentle compressor — only activates when many notes pile up.
-  // Stays completely transparent for 1–5 simultaneous notes.
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -10;  // starts compressing around 6+ notes
-  comp.knee.value       = 6;   // soft knee — no abrupt onset
-  comp.ratio.value      = 4;   // gentle 4:1, not a hard limiter
-  comp.attack.value     = 0.005;
-  comp.release.value    = 0.2;
-
-  gain.connect(comp);
-  comp.connect(destination);
+  const comp = actx.createDynamicsCompressor();
+  comp.threshold.value = -10; comp.knee.value = 6;
+  comp.ratio.value = 4; comp.attack.value = 0.005; comp.release.value = 0.2;
+  gain.connect(comp); comp.connect(destination);
   return gain;
 }
 
@@ -391,11 +590,16 @@ function ensureAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   masterGain = buildOutputChain(audioCtx, audioCtx.destination);
+  trackGains = state.tracks.map(t => {
+    const g = audioCtx.createGain();
+    g.gain.value = t.volume;
+    g.connect(masterGain);
+    return g;
+  });
 }
 
-const PEAK_GAIN = 0.22; // low enough that 8 simultaneous notes stay under 1.0
+const PEAK_GAIN = 0.22;
 
-// Applies ADSR to a GainNode. Works for both live and OfflineAudioContext.
 function scheduleEnvelope(env, t, dur) {
   const A    = state.attack  / 1000;
   const D    = state.decay   / 1000;
@@ -406,36 +610,33 @@ function scheduleEnvelope(env, t, dur) {
   const tD   = tA + D;
 
   env.gain.setValueAtTime(0, t);
-
   if (tA >= tEnd) {
     env.gain.linearRampToValueAtTime(PEAK_GAIN * (dur / A), tEnd);
   } else {
     env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);
     if (tD >= tEnd) {
-      const gainAtEnd = PEAK_GAIN * (1 - ((tEnd - tA) / D) * (1 - S));
-      env.gain.linearRampToValueAtTime(gainAtEnd, tEnd);
+      env.gain.linearRampToValueAtTime(PEAK_GAIN * (1 - ((tEnd - tA) / D) * (1 - S)), tEnd);
     } else {
       env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);
       env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);
     }
   }
-
   env.gain.linearRampToValueAtTime(0, tEnd + R);
-  return tEnd + R + 0.01; // when the oscillator can safely stop
+  return tEnd + R + 0.01;
 }
 
-function fireNote(note, t) {
+function fireNote(note, t, destGain) {
   const dur = note.duration * secPerBeat();
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
   osc.type = state.waveform;
   osc.frequency.value = midiToHz(note.pitch);
-  osc.connect(env); env.connect(masterGain);
+  osc.connect(env); env.connect(destGain);
   const stopAt = scheduleEnvelope(env, t, dur);
   osc.start(t); osc.stop(stopAt);
 }
 
-const AHEAD = 0.12; // seconds to schedule ahead
+const AHEAD = 0.12;
 
 function tick() {
   if (!state.playing) return;
@@ -450,15 +651,20 @@ function tick() {
     if (elapsed >= patSec) { stopPlay(); return; }
   }
 
-  const loopIdx = state.looping ? Math.floor(elapsed / patSec) : 0;
+  const loopIdx  = state.looping ? Math.floor(elapsed / patSec) : 0;
+  const anySolo  = state.tracks.some(t => t.solo);
 
-  for (const li of state.looping ? [loopIdx, loopIdx + 1] : [0]) {
-    state.notes.forEach((n, ni) => {
-      const t = playStartTime + li * patSec + n.start * secPerBeat();
-      const k = `${ni}:${li}`;
-      if (!scheduled.has(k) && t >= now - 0.001 && t < now + AHEAD) {
-        scheduled.add(k); fireNote(n, t);
-      }
+  for (const li of (state.looping ? [loopIdx, loopIdx + 1] : [0])) {
+    state.tracks.forEach((track, ti) => {
+      if (track.mute || (anySolo && !track.solo)) return;
+      trackGains[ti].gain.value = track.volume;
+      track.notes.forEach((n, ni) => {
+        const t = playStartTime + li * patSec + n.start * secPerBeat();
+        const k = `${ti}:${ni}:${li}`;
+        if (!scheduled.has(k) && t >= now - 0.001 && t < now + AHEAD) {
+          scheduled.add(k); fireNote(n, t, trackGains[ti]);
+        }
+      });
     });
   }
 }
@@ -469,8 +675,8 @@ async function startPlay() {
   state.playing = true;
   state.currentBeat = 0;
   scheduled.clear();
-  playStartTime   = audioCtx.currentTime;
-  schedulerTimer  = setInterval(tick, 25);
+  playStartTime  = audioCtx.currentTime;
+  schedulerTimer = setInterval(tick, 25);
   document.getElementById('playBtn').classList.add('active');
   requestAnimationFrame(animLoop);
 }
@@ -480,71 +686,63 @@ function stopPlay() {
   state.currentBeat = 0;
   clearInterval(schedulerTimer); schedulerTimer = null;
   document.getElementById('playBtn').classList.remove('active');
-  drawAll();
+  drawAllTracks();
 }
 
 // ── Mouse interaction ─────────────────────────────────────────────────────────
-let drag = null; // {note, startCol} while placing
+function addTrackEvents(ti) {
+  const { canvas, wrap } = trackEls[ti];
+  let drag = null;
 
-function relXY(e) {
-  const r = canvas.getBoundingClientRect();
-  return [e.clientX - r.left, e.clientY - r.top];
-}
-
-function xyToGrid(x, y) {
-  return {
-    col: Math.floor((x - KEYS_W) / colWidth()),
-    row: Math.floor((y - RULER_H) / ROW_H),
-  };
-}
-
-function noteAt(pitch, col) {
-  const beat = col * cellBeats();
-  return state.notes.findIndex(n =>
-    n.pitch === pitch && beat >= n.start && beat < n.start + n.duration
-  );
-}
-
-canvas.addEventListener('mousedown', e => {
-  const [x, y] = relXY(e);
-
-  // Piano key preview click
-  if (x < KEYS_W && y >= RULER_H) {
-    const row = Math.floor((y - RULER_H) / ROW_H);
-    if (row >= 0 && row < NUM_ROWS) previewNote(rowToPitch(row));
-    return;
+  function relXY(e) {
+    const r = canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
   }
 
-  if (x < KEYS_W || y < RULER_H) return;
-  const { col, row } = xyToGrid(x, y);
-  if (col < 0 || col >= numCols() || row < 0 || row >= NUM_ROWS) return;
+  canvas.addEventListener('mousedown', e => {
+    setActiveTrack(ti);
+    const [x, y] = relXY(e);
 
-  const pitch = rowToPitch(row);
-  const idx   = noteAt(pitch, col);
+    const rowH = state.tracks[ti].rowH;
 
-  if (idx >= 0) {
-    // Remove note
-    state.notes.splice(idx, 1);
-    drag = null;
-  } else {
-    // Begin placing note
-    const note = { pitch, start: col * cellBeats(), duration: cellBeats() };
-    state.notes.push(note);
-    drag = { note, startCol: col };
-  }
-  drawAll();
-});
+    // Piano key preview
+    if (x < KEYS_W && y >= RULER_H) {
+      const row = Math.floor((y - RULER_H) / rowH);
+      if (row >= 0 && row < NUM_ROWS) previewNote(rowToPitch(row));
+      return;
+    }
+    if (x < KEYS_W || y < RULER_H) return;
 
-canvas.addEventListener('mousemove', e => {
-  if (!drag || !(e.buttons & 1)) { drag = null; return; }
-  const [x] = relXY(e);
-  const col = Math.min(Math.max(Math.floor((x - KEYS_W) / colWidth()), drag.startCol), numCols() - 1);
-  drag.note.duration = (col - drag.startCol + 1) * cellBeats();
-  drawAll();
-});
+    const col = Math.floor((x - KEYS_W) / colWidth());
+    const row = Math.floor((y - RULER_H) / rowH);
+    if (col < 0 || col >= numCols() || row < 0 || row >= NUM_ROWS) return;
 
-canvas.addEventListener('mouseup',    () => { drag = null; });
-canvas.addEventListener('mouseleave', () => { drag = null; });
+    const pitch  = rowToPitch(row);
+    const beat   = col * cellBeats();
+    const notes  = state.tracks[ti].notes;
+    const idx    = notes.findIndex(n => n.pitch === pitch && beat >= n.start && beat < n.start + n.duration);
+
+    if (idx >= 0) {
+      notes.splice(idx, 1); drag = null;
+    } else {
+      const note = { pitch, start: col * cellBeats(), duration: cellBeats() };
+      notes.push(note);
+      drag = { note, startCol: col };
+    }
+    drawTrack(ti);
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!drag || !(e.buttons & 1)) { drag = null; return; }
+    const [x] = relXY(e);
+    const col = Math.min(Math.max(Math.floor((x - KEYS_W) / colWidth()), drag.startCol), numCols() - 1);
+    drag.note.duration = (col - drag.startCol + 1) * cellBeats();
+    drawTrack(ti);
+  });
+
+  canvas.addEventListener('mouseup',    () => { drag = null; });
+  canvas.addEventListener('mouseleave', () => { drag = null; });
+}
 
 function previewNote(pitch) {
   ensureAudio();
@@ -567,7 +765,7 @@ function encodeWAV(samples, sr) {
   const str = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
   str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true);
   str(8, 'WAVE'); str(12, 'fmt '); v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true); v.setUint16(22, 1, true); // PCM, mono
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true);
   v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
   v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   str(36, 'data'); v.setUint32(40, n * 2, true);
@@ -579,28 +777,33 @@ function encodeWAV(samples, sr) {
 }
 
 async function exportAudio() {
-  if (state.notes.length === 0) return;
+  const hasNotes = state.tracks.some(t => t.notes.length > 0);
+  if (!hasNotes) return;
   const btn = document.getElementById('exportBtn');
   btn.disabled = true; btn.textContent = 'Rendering…';
-
   try {
     const SR       = 44100;
-    const tail     = state.release / 1000 + 0.1; // capture full release of last notes
+    const tail     = state.release / 1000 + 0.1;
     const totalSec = patternSec() + tail;
     const offCtx   = new OfflineAudioContext(1, Math.ceil(SR * totalSec), SR);
+    const mixGain  = buildOutputChain(offCtx, offCtx.destination);
+    const anySolo  = state.tracks.some(t => t.solo);
 
-    const gain = buildOutputChain(offCtx, offCtx.destination);
-
-    state.notes.forEach(note => {
-      const t   = note.start * secPerBeat();
-      const dur = note.duration * secPerBeat();
-      const osc = offCtx.createOscillator();
-      const env = offCtx.createGain();
-      osc.type = state.waveform;
-      osc.frequency.value = midiToHz(note.pitch);
-      osc.connect(env); env.connect(gain);
-      const stopAt = scheduleEnvelope(env, t, dur);
-      osc.start(t); osc.stop(stopAt);
+    state.tracks.forEach((track) => {
+      if (track.mute || (anySolo && !track.solo) || track.notes.length === 0) return;
+      const tg = offCtx.createGain();
+      tg.gain.value = track.volume;
+      tg.connect(mixGain);
+      track.notes.forEach(note => {
+        const t   = note.start * secPerBeat();
+        const dur = note.duration * secPerBeat();
+        const osc = offCtx.createOscillator();
+        const env = offCtx.createGain();
+        osc.type = state.waveform; osc.frequency.value = midiToHz(note.pitch);
+        osc.connect(env); env.connect(tg);
+        const stopAt = scheduleEnvelope(env, t, dur);
+        osc.start(t); osc.stop(stopAt);
+      });
     });
 
     const rendered = await offCtx.startRendering();
@@ -628,7 +831,6 @@ document.querySelectorAll('.wave-btn').forEach(btn => {
 document.getElementById('playBtn').addEventListener('click', () => {
   if (state.playing) stopPlay(); else startPlay();
 });
-
 document.getElementById('stopBtn').addEventListener('click', stopPlay);
 
 document.getElementById('bpmSlider').addEventListener('input', e => {
@@ -656,19 +858,20 @@ document.getElementById('release').addEventListener('input', e => {
 
 document.getElementById('barsSelect').addEventListener('change', e => {
   state.bars = +e.target.value;
-  state.notes = state.notes.filter(n => n.start < totalBeats());
-  resizeCanvas(); drawAll();
+  const max = totalBeats();
+  state.tracks.forEach(t => { t.notes = t.notes.filter(n => n.start < max); });
+  resizeAll(); drawAllTracks();
 });
 
 document.getElementById('resSelect').addEventListener('change', e => {
   state.resolution = +e.target.value;
-  resizeCanvas(); drawAll();
+  resizeAll(); drawAllTracks();
 });
 
 document.getElementById('zoomSlider').addEventListener('input', e => {
   state.zoom = +e.target.value;
   document.getElementById('zoomVal').textContent = state.zoom.toFixed(1) + '×';
-  resizeCanvas(); drawAll();
+  resizeAll(); drawAllTracks();
 });
 
 document.getElementById('loopBtn').addEventListener('click', () => {
@@ -677,15 +880,18 @@ document.getElementById('loopBtn').addEventListener('click', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
-  if (state.notes.length === 0) return;
-  state.notes = []; drawAll();
+  const track = state.tracks[state.activeTrack];
+  if (track.notes.length === 0) return;
+  track.notes = []; drawTrack(state.activeTrack);
 });
 
 document.getElementById('exportBtn').addEventListener('click', exportAudio);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-resizeCanvas();
-drawAll();
+buildTrackUI();
+resizeAll();
+initScroll();
+drawAllTracks();
 </script>
 </body>
 </html>
