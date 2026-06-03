@@ -69,6 +69,14 @@ select:focus { outline: 1px solid var(--accent); }
 
 .bpm-val { color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; min-width: 30px; }
 
+.adsr-group { align-items: flex-start; flex-direction: column; gap: 2px; }
+.adsr-row   { display: flex; align-items: center; gap: 5px; }
+.adsr-lbl   { color: var(--muted); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em; width: 10px; text-align: right; }
+.adsr-slider { width: 72px; }
+.adsr-val   { color: var(--accent); font-size: 10px; font-variant-numeric: tabular-nums;
+  min-width: 36px; }
+
 /* ── Piano roll ── */
 .roll-wrap { flex: 1; overflow: auto; position: relative; }
 #roll { display: block; cursor: crosshair; }
@@ -106,6 +114,29 @@ select:focus { outline: 1px solid var(--accent); }
     <button class="wave-btn" data-wave="sawtooth">Saw</button>
   </div>
   <div class="tdiv"></div>
+  <div class="tgroup adsr-group">
+    <div class="adsr-row">
+      <span class="adsr-lbl">A</span>
+      <input type="range" id="attack"  class="adsr-slider" min="1"  max="500"  step="1"    value="5">
+      <span class="adsr-val" id="attack-val">5ms</span>
+    </div>
+    <div class="adsr-row">
+      <span class="adsr-lbl">D</span>
+      <input type="range" id="decay"   class="adsr-slider" min="10" max="1000" step="5"    value="80">
+      <span class="adsr-val" id="decay-val">80ms</span>
+    </div>
+    <div class="adsr-row">
+      <span class="adsr-lbl">S</span>
+      <input type="range" id="sustain" class="adsr-slider" min="0"  max="1"    step="0.01" value="0.7">
+      <span class="adsr-val" id="sustain-val">0.70</span>
+    </div>
+    <div class="adsr-row">
+      <span class="adsr-lbl">R</span>
+      <input type="range" id="release" class="adsr-slider" min="10" max="2000" step="5"    value="60">
+      <span class="adsr-val" id="release-val">60ms</span>
+    </div>
+  </div>
+  <div class="tdiv"></div>
   <div class="tgroup">
     <button id="loopBtn" class="active">⟳ Loop</button>
   </div>
@@ -138,9 +169,13 @@ const state = {
   bpm:      120,
   bars:     2,
   waveform: 'sine',
+  attack:   5,     // ms
+  decay:    80,    // ms
+  sustain:  0.7,   // 0–1 level
+  release:  60,    // ms
   playing:  false,
   looping:  true,
-  currentBeat: 0,  // live playback position in beats
+  currentBeat: 0,
 };
 
 const CELL_BEATS = 0.25; // one 16th note
@@ -320,18 +355,33 @@ function ensureAudio() {
   limiter.connect(audioCtx.destination);
 }
 
+const PEAK_GAIN = 0.5;
+
 function fireNote(note, t) {
   const dur = note.duration * secPerBeat();
+  const A   = state.attack  / 1000;
+  const D   = state.decay   / 1000;
+  const S   = state.sustain;
+  const R   = state.release / 1000;
+
+  const tA   = t + Math.min(A, dur);               // end of attack
+  const tD   = Math.min(tA + D, t + dur);           // end of decay (clamped to gate)
+  const tEnd = t + dur;                             // note-off / start of release
+
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
   osc.type = state.waveform;
   osc.frequency.value = midiToHz(note.pitch);
   osc.connect(env); env.connect(masterGain);
+
   env.gain.setValueAtTime(0, t);
-  env.gain.linearRampToValueAtTime(0.4, t + 0.005);
-  env.gain.setValueAtTime(0.4, t + Math.max(dur - 0.03, 0.005));
-  env.gain.linearRampToValueAtTime(0, t + dur);
-  osc.start(t); osc.stop(t + dur + 0.02);
+  env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);           // attack
+  env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);       // decay → sustain
+  env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);              // hold sustain
+  env.gain.linearRampToValueAtTime(0, tEnd + R);             // release
+
+  osc.start(t);
+  osc.stop(tEnd + R + 0.01);
 }
 
 const AHEAD = 0.12; // seconds to schedule ahead
@@ -477,6 +527,23 @@ document.getElementById('bpmSlider').addEventListener('input', e => {
   state.bpm = +e.target.value;
   document.getElementById('bpmVal').textContent = state.bpm;
   if (state.playing) { stopPlay(); startPlay(); }
+});
+
+document.getElementById('attack').addEventListener('input', e => {
+  state.attack = +e.target.value;
+  document.getElementById('attack-val').textContent = state.attack + 'ms';
+});
+document.getElementById('decay').addEventListener('input', e => {
+  state.decay = +e.target.value;
+  document.getElementById('decay-val').textContent = state.decay + 'ms';
+});
+document.getElementById('sustain').addEventListener('input', e => {
+  state.sustain = +e.target.value;
+  document.getElementById('sustain-val').textContent = state.sustain.toFixed(2);
+});
+document.getElementById('release').addEventListener('input', e => {
+  state.release = +e.target.value;
+  document.getElementById('release-val').textContent = state.release + 'ms';
 });
 
 document.getElementById('barsSelect').addEventListener('change', e => {
