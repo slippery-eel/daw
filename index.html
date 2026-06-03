@@ -99,6 +99,14 @@ select:focus { outline: 1px solid var(--accent); }
   </div>
   <div class="tdiv"></div>
   <div class="tgroup">
+    <span class="tlabel">Wave</span>
+    <button class="wave-btn active" data-wave="sine">Sine</button>
+    <button class="wave-btn" data-wave="square">Square</button>
+    <button class="wave-btn" data-wave="triangle">Tri</button>
+    <button class="wave-btn" data-wave="sawtooth">Saw</button>
+  </div>
+  <div class="tdiv"></div>
+  <div class="tgroup">
     <button id="loopBtn" class="active">⟳ Loop</button>
   </div>
   <div class="tdiv"></div>
@@ -127,8 +135,9 @@ const BLACK_KEYS = new Set([1, 3, 6, 8, 10]); // semitone offsets that are black
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   notes: [],       // [{pitch, start, duration}] — start/duration in beats (1 beat = quarter note)
-  bpm:   120,
-  bars:  2,
+  bpm:      120,
+  bars:     2,
+  waveform: 'sine',
   playing:  false,
   looping:  true,
   currentBeat: 0,  // live playback position in beats
@@ -315,7 +324,7 @@ function fireNote(note, t) {
   const dur = note.duration * secPerBeat();
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
-  osc.type = 'sine';
+  osc.type = state.waveform;
   osc.frequency.value = midiToHz(note.pitch);
   osc.connect(env); env.connect(masterGain);
   env.gain.setValueAtTime(0, t);
@@ -442,7 +451,7 @@ function previewNote(pitch) {
   const t   = audioCtx.currentTime;
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
-  osc.type = 'sine'; osc.frequency.value = midiToHz(pitch);
+  osc.type = state.waveform; osc.frequency.value = midiToHz(pitch);
   osc.connect(env); env.connect(masterGain);
   env.gain.setValueAtTime(0.4, t);
   env.gain.linearRampToValueAtTime(0, t + 0.5);
@@ -450,6 +459,14 @@ function previewNote(pitch) {
 }
 
 // ── Transport bindings ────────────────────────────────────────────────────────
+document.querySelectorAll('.wave-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.waveform = btn.dataset.wave;
+    document.querySelectorAll('.wave-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
 document.getElementById('playBtn').addEventListener('click', () => {
   if (state.playing) stopPlay(); else startPlay();
 });
