@@ -144,6 +144,10 @@ select:focus { outline: 1px solid var(--accent); }
   <div class="tgroup">
     <button id="clearBtn">✕ Clear</button>
   </div>
+  <div class="tdiv"></div>
+  <div class="tgroup">
+    <button id="exportBtn">↓ Export WAV</button>
+  </div>
 </div>
 
 <div class="roll-wrap">
@@ -357,46 +361,44 @@ function ensureAudio() {
 
 const PEAK_GAIN = 0.5;
 
-function fireNote(note, t) {
-  const dur  = note.duration * secPerBeat();
+// Applies ADSR to a GainNode. Works for both live and OfflineAudioContext.
+function scheduleEnvelope(env, t, dur) {
   const A    = state.attack  / 1000;
   const D    = state.decay   / 1000;
   const S    = state.sustain;
   const R    = state.release / 1000;
   const tEnd = t + dur;
+  const tA   = t + A;
+  const tD   = tA + D;
 
-  // Unclamped phase end times — we decide per-phase whether each fits
-  const tA = t + A;
-  const tD = tA + D;
+  env.gain.setValueAtTime(0, t);
 
+  if (tA >= tEnd) {
+    env.gain.linearRampToValueAtTime(PEAK_GAIN * (dur / A), tEnd);
+  } else {
+    env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);
+    if (tD >= tEnd) {
+      const gainAtEnd = PEAK_GAIN * (1 - ((tEnd - tA) / D) * (1 - S));
+      env.gain.linearRampToValueAtTime(gainAtEnd, tEnd);
+    } else {
+      env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);
+      env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);
+    }
+  }
+
+  env.gain.linearRampToValueAtTime(0, tEnd + R);
+  return tEnd + R + 0.01; // when the oscillator can safely stop
+}
+
+function fireNote(note, t) {
+  const dur = note.duration * secPerBeat();
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
   osc.type = state.waveform;
   osc.frequency.value = midiToHz(note.pitch);
   osc.connect(env); env.connect(masterGain);
-
-  env.gain.setValueAtTime(0, t);
-
-  if (tA >= tEnd) {
-    // Attack alone overruns the note: ramp to a partial peak at tEnd
-    env.gain.linearRampToValueAtTime(PEAK_GAIN * (dur / A), tEnd);
-  } else {
-    env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);          // full attack
-    if (tD >= tEnd) {
-      // Decay overruns: interpolate decay value at note-off (no extra point needed)
-      const decayFraction = (tEnd - tA) / D;
-      const gainAtEnd = PEAK_GAIN * (1 - decayFraction * (1 - S));
-      env.gain.linearRampToValueAtTime(gainAtEnd, tEnd);
-    } else {
-      env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);    // full decay
-      env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);           // anchor sustain for release
-    }
-  }
-
-  env.gain.linearRampToValueAtTime(0, tEnd + R);              // release
-
-  osc.start(t);
-  osc.stop(tEnd + R + 0.01);
+  const stopAt = scheduleEnvelope(env, t, dur);
+  osc.start(t); osc.stop(stopAt);
 }
 
 const AHEAD = 0.12; // seconds to schedule ahead
@@ -523,6 +525,68 @@ function previewNote(pitch) {
   osc.start(t); osc.stop(t + 0.55);
 }
 
+// ── WAV export ────────────────────────────────────────────────────────────────
+function encodeWAV(samples, sr) {
+  const n   = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v   = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true);
+  str(8, 'WAVE'); str(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); // PCM, mono
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return buf;
+}
+
+async function exportAudio() {
+  if (state.notes.length === 0) return;
+  const btn = document.getElementById('exportBtn');
+  btn.disabled = true; btn.textContent = 'Rendering…';
+
+  try {
+    const SR       = 44100;
+    const tail     = state.release / 1000 + 0.1; // capture full release of last notes
+    const totalSec = patternSec() + tail;
+    const offCtx   = new OfflineAudioContext(1, Math.ceil(SR * totalSec), SR);
+
+    const gain = offCtx.createGain();
+    gain.gain.value = 0.65;
+    const limiter = offCtx.createDynamicsCompressor();
+    limiter.threshold.value = -3; limiter.knee.value = 0;
+    limiter.ratio.value = 20; limiter.attack.value = 0.001; limiter.release.value = 0.08;
+    gain.connect(limiter); limiter.connect(offCtx.destination);
+
+    state.notes.forEach(note => {
+      const t   = note.start * secPerBeat();
+      const dur = note.duration * secPerBeat();
+      const osc = offCtx.createOscillator();
+      const env = offCtx.createGain();
+      osc.type = state.waveform;
+      osc.frequency.value = midiToHz(note.pitch);
+      osc.connect(env); env.connect(gain);
+      const stopAt = scheduleEnvelope(env, t, dur);
+      osc.start(t); osc.stop(stopAt);
+    });
+
+    const rendered = await offCtx.startRendering();
+    const wavBuf   = encodeWAV(rendered.getChannelData(0), SR);
+    const blob     = new Blob([wavBuf], { type: 'audio/wav' });
+    const url      = URL.createObjectURL(blob);
+    const a        = document.createElement('a');
+    a.href = url; a.download = 'pattern.wav';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } finally {
+    btn.disabled = false; btn.textContent = '↓ Export WAV';
+  }
+}
+
 // ── Transport bindings ────────────────────────────────────────────────────────
 document.querySelectorAll('.wave-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -577,6 +641,8 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   if (state.notes.length === 0) return;
   state.notes = []; drawAll();
 });
+
+document.getElementById('exportBtn').addEventListener('click', exportAudio);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 resizeCanvas();
