@@ -343,23 +343,45 @@ let audioCtx = null, masterGain = null;
 let schedulerTimer = null, playStartTime = 0;
 const scheduled = new Set(); // "noteIdx:loopIdx" keys
 
+// Builds: masterGain → DynamicsCompressor → WaveShaper (tanh soft clip) → destination.
+// Returns the masterGain node that note voices should connect to.
+// Shared by both the live AudioContext and OfflineAudioContext for export.
+function buildOutputChain(ctx, destination) {
+  const gain = ctx.createGain();
+  gain.gain.value = 0.55;
+
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -6;   // start compressing earlier
+  limiter.knee.value       = 3;   // soft knee — gentler onset, less pumping
+  limiter.ratio.value      = 12;
+  limiter.attack.value     = 0.003;
+  limiter.release.value    = 0.15;
+
+  // Tanh soft clipper — sample-accurate ceiling, catches any peaks the
+  // compressor's attack window lets through.
+  const clipper = ctx.createWaveShaper();
+  clipper.oversample = '4x';
+  const N = 512;
+  const curve = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const x = (i / (N - 1)) * 2 - 1; // −1 … +1
+    curve[i] = Math.tanh(x * 2) / Math.tanh(2) * 0.95;
+  }
+  clipper.curve = curve;
+
+  gain.connect(limiter);
+  limiter.connect(clipper);
+  clipper.connect(destination);
+  return gain;
+}
+
 function ensureAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  masterGain = audioCtx.createGain();
-  masterGain.gain.value = 0.65;
-  // Hard limiter — prevents clipping when many notes sound simultaneously
-  const limiter = audioCtx.createDynamicsCompressor();
-  limiter.threshold.value = -3;
-  limiter.knee.value       = 0;
-  limiter.ratio.value      = 20;
-  limiter.attack.value     = 0.001;
-  limiter.release.value    = 0.08;
-  masterGain.connect(limiter);
-  limiter.connect(audioCtx.destination);
+  masterGain = buildOutputChain(audioCtx, audioCtx.destination);
 }
 
-const PEAK_GAIN = 0.5;
+const PEAK_GAIN = 0.3;
 
 // Applies ADSR to a GainNode. Works for both live and OfflineAudioContext.
 function scheduleEnvelope(env, t, dur) {
@@ -555,12 +577,7 @@ async function exportAudio() {
     const totalSec = patternSec() + tail;
     const offCtx   = new OfflineAudioContext(1, Math.ceil(SR * totalSec), SR);
 
-    const gain = offCtx.createGain();
-    gain.gain.value = 0.65;
-    const limiter = offCtx.createDynamicsCompressor();
-    limiter.threshold.value = -3; limiter.knee.value = 0;
-    limiter.ratio.value = 20; limiter.attack.value = 0.001; limiter.release.value = 0.08;
-    gain.connect(limiter); limiter.connect(offCtx.destination);
+    const gain = buildOutputChain(offCtx, offCtx.destination);
 
     state.notes.forEach(note => {
       const t   = note.start * secPerBeat();
