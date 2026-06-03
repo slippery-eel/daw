@@ -83,12 +83,13 @@ select:focus { outline: 1px solid var(--accent); }
 }
 
 .track-row {
-  display: flex; flex-direction: row; flex-shrink: 0;
+  display: flex; flex-direction: column; flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
+.track-main { display: flex; flex-direction: row; }
 
 .track-head {
-  width: 148px; flex-shrink: 0;
+  width: 164px; flex-shrink: 0;
   background: var(--surface);
   border-right: 2px solid var(--border);
   padding: 8px 10px;
@@ -115,8 +116,28 @@ select:focus { outline: 1px solid var(--accent); }
 .tbtn.soloed { border-color: rgba(255,200,0,.5); color: #ffc800; background: rgba(255,200,0,.1); }
 
 .track-vol-row { display: flex; align-items: center; gap: 5px; }
-.track-vol-row input[type="range"] { width: 70px; }
+.track-vol-row input[type="range"] { width: 76px; }
 .vol-val { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; min-width: 28px; }
+/* ── FX strip ── */
+.fx-strip {
+  display: none; flex-direction: row;
+  background: #060910; border-top: 1px solid var(--border);
+  overflow-x: auto; flex-shrink: 0;
+}
+.fx-strip.open { display: flex; }
+.fx-block {
+  padding: 8px 14px; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px; min-width: 148px;
+}
+.fx-block-name {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 1px;
+}
+.fx-row { display: flex; align-items: center; gap: 6px; }
+.fx-lbl { color: var(--muted); font-size: 10px; font-weight: 500; min-width: 38px; }
+.fx-row input[type="range"] { width: 68px; }
+.fx-val { color: var(--muted); font-size: 10px; min-width: 34px;
+  font-variant-numeric: tabular-nums; }
 
 .roll-wrap {
   flex: 1; overflow: auto;
@@ -259,7 +280,11 @@ const state = {
     mute:   false,
     solo:   false,
     volume: 1.0,
-    rowH:   18,   // px per pitch row — vertical zoom (8–40); track container height stays fixed
+    rowH:   18,
+    eq:     { bass: 0, treble: 0 },
+    grit:   { amount: 0 },
+    delay:  { mix: 0, time: 250, feedback: 0.35 },
+    reverb: { mix: 0, roomSize: 0.5, decay: 0.5 },
   })),
   activeTrack: 0,
   bpm:         120,
@@ -300,6 +325,10 @@ function buildTrackUI() {
     row.className = 'track-row' + (ti === 0 ? ' active' : '');
     row.style.setProperty('--track-color', color);
 
+    // ── track-main (head + roll + zoom) ───────────────────────────────────────
+    const main = document.createElement('div');
+    main.className = 'track-main';
+
     // ── Header ──────────────────────────────────────────────────────────────
     const head = document.createElement('div');
     head.className = 'track-head';
@@ -308,6 +337,7 @@ function buildTrackUI() {
       <div class="track-btns">
         <button class="tbtn mute-btn">M</button>
         <button class="tbtn solo-btn">S</button>
+        <button class="tbtn fx-btn">FX</button>
       </div>
       <div class="track-vol-row">
         <span class="adsr-lbl" style="color:var(--muted)">Vol</span>
@@ -317,18 +347,13 @@ function buildTrackUI() {
 
     head.addEventListener('click', () => setActiveTrack(ti));
 
-    const muteBtn = head.querySelector('.mute-btn');
-    muteBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      track.mute = !track.mute;
-      muteBtn.classList.toggle('muted', track.mute);
+    head.querySelector('.mute-btn').addEventListener('click', e => {
+      e.stopPropagation(); track.mute = !track.mute;
+      e.currentTarget.classList.toggle('muted', track.mute);
     });
-
-    const soloBtn = head.querySelector('.solo-btn');
-    soloBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      track.solo = !track.solo;
-      soloBtn.classList.toggle('soloed', track.solo);
+    head.querySelector('.solo-btn').addEventListener('click', e => {
+      e.stopPropagation(); track.solo = !track.solo;
+      e.currentTarget.classList.toggle('soloed', track.solo);
     });
 
     const volSlider = head.querySelector('.track-vol');
@@ -339,67 +364,134 @@ function buildTrackUI() {
       if (trackGains[ti]) trackGains[ti].gain.value = track.volume;
     });
 
-    // ── Canvas wrapper ───────────────────────────────────────────────────────
-    const wrap = document.createElement('div');
-    wrap.className = 'roll-wrap';
+    // ── Canvas + zoom ─────────────────────────────────────────────────────────
+    const wrap   = document.createElement('div'); wrap.className = 'roll-wrap';
+    const canvas = document.createElement('canvas'); canvas.className = 'roll';
+    wrap.appendChild(canvas);
 
-    const canvas = document.createElement('canvas');
-    canvas.className = 'roll';
-
-    // ── Vertical zoom (custom drag) ──────────────────────────────────────────
-    const zoomCol  = document.createElement('div');
-    zoomCol.className = 'zoom-col';
+    const zoomCol = document.createElement('div'); zoomCol.className = 'zoom-col';
     zoomCol.title = 'Drag to zoom pitch rows';
-
-    const groove = document.createElement('div');
-    groove.className = 'zoom-groove';
-
-    const thumb = document.createElement('div');
-    thumb.className = 'zoom-thumb';
-    groove.appendChild(thumb);
-    zoomCol.appendChild(groove);
+    const groove  = document.createElement('div'); groove.className = 'zoom-groove';
+    const thumb   = document.createElement('div'); thumb.className  = 'zoom-thumb';
+    groove.appendChild(thumb); zoomCol.appendChild(groove);
 
     const ZOOM_MIN = 8, ZOOM_MAX = 40;
-
     function setThumb() {
-      // thumb top %: 0% = max zoom (top), 100% = min zoom (bottom)
-      const pct = 1 - (track.rowH - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN);
-      thumb.style.top = (pct * 100) + '%';
+      thumb.style.top = ((1 - (track.rowH - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)) * 100) + '%';
     }
     setThumb();
-
     let zDragging = false, zStartY = 0, zStartRowH = track.rowH;
-
     zoomCol.addEventListener('mousedown', e => {
-      zDragging  = true;
-      zStartY    = e.clientY;
-      zStartRowH = track.rowH;
-      e.preventDefault();
+      zDragging = true; zStartY = e.clientY; zStartRowH = track.rowH; e.preventDefault();
     });
-
     document.addEventListener('mousemove', e => {
       if (!zDragging) return;
-      const grooveH = groove.getBoundingClientRect().height || 1;
-      const dy      = zStartY - e.clientY; // up = positive = zoom in
-      const delta   = Math.round((dy / grooveH) * (ZOOM_MAX - ZOOM_MIN));
-      track.rowH    = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zStartRowH + delta));
-      setThumb();
-      resizeTrack(ti);
-      scrollToC4(ti);
-      drawTrack(ti);
+      const dy = zStartY - e.clientY;
+      const delta = Math.round((dy / (groove.getBoundingClientRect().height || 1)) * (ZOOM_MAX - ZOOM_MIN));
+      track.rowH = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zStartRowH + delta));
+      setThumb(); resizeTrack(ti); scrollToC4(ti); drawTrack(ti);
     });
-
     document.addEventListener('mouseup', () => { zDragging = false; });
 
-    wrap.appendChild(canvas);
-    row.appendChild(head);
-    row.appendChild(wrap);
-    row.appendChild(zoomCol);
+    main.appendChild(head); main.appendChild(wrap); main.appendChild(zoomCol);
+
+    // ── FX strip (collapsible, below main row) ───────────────────────────────
+    const fxStrip = document.createElement('div');
+    fxStrip.className = 'fx-strip';
+    fxStrip.innerHTML = `
+      <div class="fx-block">
+        <div class="fx-block-name">EQ</div>
+        <div class="fx-row">
+          <span class="fx-lbl">Bass</span>
+          <input type="range" class="eq-bass" min="-1" max="1" step="0.01" value="0">
+          <span class="fx-val eq-bass-val">0dB</span>
+        </div>
+        <div class="fx-row">
+          <span class="fx-lbl">Treble</span>
+          <input type="range" class="eq-treble" min="-1" max="1" step="0.01" value="0">
+          <span class="fx-val eq-tre-val">0dB</span>
+        </div>
+      </div>
+      <div class="fx-block">
+        <div class="fx-block-name">Grit</div>
+        <div class="fx-row">
+          <span class="fx-lbl">Amount</span>
+          <input type="range" class="grit-amt" min="0" max="1" step="0.01" value="0">
+          <span class="fx-val grit-val">0%</span>
+        </div>
+      </div>
+      <div class="fx-block">
+        <div class="fx-block-name">Delay</div>
+        <div class="fx-row">
+          <span class="fx-lbl">Mix</span>
+          <input type="range" class="dly-mix" min="0" max="1" step="0.01" value="0">
+          <span class="fx-val dly-mix-val">0%</span>
+        </div>
+        <div class="fx-row">
+          <span class="fx-lbl">Time</span>
+          <input type="range" class="dly-time" min="20" max="800" step="5" value="250">
+          <span class="fx-val dly-time-val">250ms</span>
+        </div>
+        <div class="fx-row">
+          <span class="fx-lbl">Feedback</span>
+          <input type="range" class="dly-fb" min="0" max="0.9" step="0.01" value="0.35">
+          <span class="fx-val dly-fb-val">35%</span>
+        </div>
+      </div>
+      <div class="fx-block">
+        <div class="fx-block-name">Reverb</div>
+        <div class="fx-row">
+          <span class="fx-lbl">Mix</span>
+          <input type="range" class="rev-mix" min="0" max="1" step="0.01" value="0">
+          <span class="fx-val rev-mix-val">0%</span>
+        </div>
+        <div class="fx-row">
+          <span class="fx-lbl">Room</span>
+          <input type="range" class="rev-room" min="0" max="1" step="0.01" value="0.5">
+        </div>
+        <div class="fx-row">
+          <span class="fx-lbl">Decay</span>
+          <input type="range" class="rev-decay" min="0" max="1" step="0.01" value="0.5">
+        </div>
+      </div>`;
+
+    // FX toggle button
+    const fxBtn = head.querySelector('.fx-btn');
+    fxBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      fxStrip.classList.toggle('open');
+      fxBtn.classList.toggle('active', fxStrip.classList.contains('open'));
+    });
+
+    // Wire FX sliders
+    function fxSlider(sel, get, set, fmt) {
+      const el = fxStrip.querySelector(sel);
+      const valEl = fxStrip.querySelector(sel + '-val');
+      el.addEventListener('input', () => {
+        set(+el.value);
+        if (valEl) valEl.textContent = fmt(+el.value);
+        applyFxParams(ti);
+      });
+    }
+    const pct  = v => Math.round(v * 100) + '%';
+    const db   = v => (v >= 0 ? '+' : '') + Math.round(v * 12) + 'dB';
+    const ms   = v => Math.round(v) + 'ms';
+    fxSlider('.eq-bass',   () => track.eq.bass,           v => { track.eq.bass   = v; }, db);
+    fxSlider('.eq-treble', () => track.eq.treble,         v => { track.eq.treble = v; }, db);
+    fxSlider('.grit-amt',  () => track.grit.amount,       v => { track.grit.amount    = v; }, pct);
+    fxSlider('.dly-mix',   () => track.delay.mix,         v => { track.delay.mix      = v; }, pct);
+    fxSlider('.dly-time',  () => track.delay.time,        v => { track.delay.time     = v; }, ms);
+    fxSlider('.dly-fb',    () => track.delay.feedback,    v => { track.delay.feedback = v; }, pct);
+    fxSlider('.rev-mix',   () => track.reverb.mix,        v => { track.reverb.mix     = v; }, pct);
+    fxSlider('.rev-room',  () => track.reverb.roomSize,   v => { track.reverb.roomSize= v; }, () => '');
+    fxSlider('.rev-decay', () => track.reverb.decay,      v => { track.reverb.decay   = v; }, () => '');
+
+    row.appendChild(main);
+    row.appendChild(fxStrip);
     container.appendChild(row);
 
     const ctx = canvas.getContext('2d');
     trackEls[ti] = { row, head, canvas, ctx, wrap };
-
     addTrackEvents(ti);
   });
 }
@@ -589,7 +681,7 @@ function animLoop() {
 
 // ── Audio engine ──────────────────────────────────────────────────────────────
 let audioCtx = null, masterGain = null;
-let trackGains = [];
+let trackGains = [], trackFxIns = [], trackFxChains = [];
 let schedulerTimer = null, playStartTime = 0;
 const scheduled = new Set();
 
@@ -603,16 +695,98 @@ function buildOutputChain(actx, destination) {
   return gain;
 }
 
+function createReverbIR(actx, roomSize, decay) {
+  const sr  = actx.sampleRate;
+  const dur = 0.3 + roomSize * 4.7;
+  const len = Math.floor(sr * dur);
+  const buf = actx.createBuffer(2, len, sr);
+  const exp = 0.5 + (1 - decay) * 4;
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++)
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, exp);
+  }
+  return buf;
+}
+
+function setGritCurve(ws, amount) {
+  if (amount < 0.01) { ws.curve = null; return; }
+  const n = 256, k = amount * 100, curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = ((Math.PI + k) * x) / (Math.PI + k * Math.abs(x));
+  }
+  ws.curve = curve;
+}
+
+// Full FX chain: fxIn → EQ → Grit → Delay → Reverb → tGain → master
+function buildTrackChain(actx, track, masterDest) {
+  const tGain = actx.createGain(); tGain.gain.value = track.volume; tGain.connect(masterDest);
+
+  // EQ
+  const bassEQ = actx.createBiquadFilter();
+  bassEQ.type = 'lowshelf'; bassEQ.frequency.value = 200; bassEQ.gain.value = track.eq.bass * 12;
+  const trebleEQ = actx.createBiquadFilter();
+  trebleEQ.type = 'highshelf'; trebleEQ.frequency.value = 4000; trebleEQ.gain.value = track.eq.treble * 12;
+
+  // Grit
+  const gritWS = actx.createWaveShaper(); gritWS.oversample = '2x';
+  setGritCurve(gritWS, track.grit.amount);
+
+  // Delay
+  const delayDry  = actx.createGain(); delayDry.gain.value = 1 - track.delay.mix;
+  const delayNode = actx.createDelay(4.0); delayNode.delayTime.value = track.delay.time / 1000;
+  const feedbackGain = actx.createGain(); feedbackGain.gain.value = track.delay.feedback;
+  const delayWet  = actx.createGain(); delayWet.gain.value = track.delay.mix;
+  const delayMix  = actx.createGain(); delayMix.gain.value = 1;
+
+  // Reverb
+  const revDry = actx.createGain(); revDry.gain.value = 1 - track.reverb.mix;
+  const conv   = actx.createConvolver();
+  conv.buffer  = createReverbIR(actx, track.reverb.roomSize, track.reverb.decay);
+  const revWet = actx.createGain(); revWet.gain.value = track.reverb.mix * 0.8;
+
+  // Wire up
+  const fxIn = actx.createGain();
+  fxIn.connect(bassEQ); bassEQ.connect(trebleEQ); trebleEQ.connect(gritWS);
+  gritWS.connect(delayDry);   delayDry.connect(delayMix);
+  gritWS.connect(delayNode);  delayNode.connect(feedbackGain); feedbackGain.connect(delayNode);
+  delayNode.connect(delayWet); delayWet.connect(delayMix);
+  delayMix.connect(revDry);   revDry.connect(tGain);
+  delayMix.connect(conv);     conv.connect(revWet); revWet.connect(tGain);
+
+  return { tGain, fxIn, bassEQ, trebleEQ, gritWS, delayNode, feedbackGain, delayDry, delayWet, conv, revDry, revWet };
+}
+
 function ensureAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   masterGain = buildOutputChain(audioCtx, audioCtx.destination);
-  trackGains = state.tracks.map(t => {
-    const g = audioCtx.createGain();
-    g.gain.value = t.volume;
-    g.connect(masterGain);
-    return g;
+  trackGains = []; trackFxIns = []; trackFxChains = [];
+  state.tracks.forEach(track => {
+    const chain = buildTrackChain(audioCtx, track, masterGain);
+    trackGains.push(chain.tGain);
+    trackFxIns.push(chain.fxIn);
+    trackFxChains.push(chain);
   });
+}
+
+function applyFxParams(ti) {
+  if (!audioCtx) return;
+  const track = state.tracks[ti];
+  const fx    = trackFxChains[ti];
+  const now   = audioCtx.currentTime;
+  fx.bassEQ.gain.setTargetAtTime(track.eq.bass * 12,     now, 0.02);
+  fx.trebleEQ.gain.setTargetAtTime(track.eq.treble * 12, now, 0.02);
+  setGritCurve(fx.gritWS, track.grit.amount);
+  fx.delayNode.delayTime.setTargetAtTime(track.delay.time / 1000, now, 0.05);
+  fx.feedbackGain.gain.setTargetAtTime(track.delay.feedback, now, 0.02);
+  fx.delayDry.gain.setTargetAtTime(1 - track.delay.mix, now, 0.02);
+  fx.delayWet.gain.setTargetAtTime(track.delay.mix,     now, 0.02);
+  fx.revDry.gain.setTargetAtTime(1 - track.reverb.mix,       now, 0.05);
+  fx.revWet.gain.setTargetAtTime(track.reverb.mix * 0.8,     now, 0.05);
+  if (track.reverb.mix > 0.01)
+    fx.conv.buffer = createReverbIR(audioCtx, track.reverb.roomSize, track.reverb.decay);
 }
 
 const PEAK_GAIN = 0.22;
@@ -680,7 +854,7 @@ function tick() {
         const t = playStartTime + li * patSec + n.start * secPerBeat();
         const k = `${ti}:${ni}:${li}`;
         if (!scheduled.has(k) && t >= now - 0.001 && t < now + AHEAD) {
-          scheduled.add(k); fireNote(n, t, trackGains[ti]);
+          scheduled.add(k); fireNote(n, t, trackFxIns[ti]);
         }
       });
     });
@@ -820,8 +994,12 @@ async function exportAudio() {
   const btn = document.getElementById('exportBtn');
   btn.disabled = true; btn.textContent = 'Rendering…';
   try {
-    const SR       = 44100;
-    const tail     = state.release / 1000 + 0.1;
+    const SR = 44100;
+    const reverbTail = Math.max(0, ...state.tracks.map(t =>
+      t.reverb.mix > 0 ? 0.3 + t.reverb.roomSize * 4.7 : 0));
+    const delayTail = Math.max(0, ...state.tracks.map(t =>
+      t.delay.mix > 0 ? (t.delay.time / 1000) * 6 : 0));
+    const tail = state.release / 1000 + 0.1 + Math.max(reverbTail, delayTail);
     const totalSec = patternSec() + tail;
     const offCtx   = new OfflineAudioContext(1, Math.ceil(SR * totalSec), SR);
     const mixGain  = buildOutputChain(offCtx, offCtx.destination);
@@ -829,16 +1007,14 @@ async function exportAudio() {
 
     state.tracks.forEach((track) => {
       if (track.mute || (anySolo && !track.solo) || track.notes.length === 0) return;
-      const tg = offCtx.createGain();
-      tg.gain.value = track.volume;
-      tg.connect(mixGain);
+      const { tGain, fxIn } = buildTrackChain(offCtx, track, mixGain);
       track.notes.forEach(note => {
         const t   = note.start * secPerBeat();
         const dur = note.duration * secPerBeat();
         const osc = offCtx.createOscillator();
         const env = offCtx.createGain();
         osc.type = state.waveform; osc.frequency.value = midiToHz(note.pitch);
-        osc.connect(env); env.connect(tg);
+        osc.connect(env); env.connect(fxIn);
         const stopAt = scheduleEnvelope(env, t, dur, PEAK_GAIN * ((note.velocity ?? 100) / 127));
         osc.start(t); osc.stop(stopAt);
       });

@@ -34,23 +34,28 @@ Click-drag **vertically** on a placed note to set its velocity (0–127). Notes 
 
 ---
 
-## v3.0 — Reverb Effect
+## v3.0 — Reverb Effect ✅
 Per-track reverb toggle. Uses `ConvolverNode` with a procedurally generated impulse response (port `createReverbIR()` from `../Noise/app.js`). Controls: Mix (0–100%), Room size (small/medium/large), Decay.
 
 ---
 
-## v3.1 — Echo / Delay Effect
+## v3.1 — Echo / Delay Effect ✅ *(implemented with v3 redesign)*
 Per-track delay using `DelayNode` + feedback `GainNode` + dry/wet blend `GainNode`s. Controls: Delay time (ms), Feedback (0–90%), Mix. Port the concept from `echoDelay()` in `../voice-mod/index.html`.
 
 ---
 
-## v3.2 — EQ (Bass + Treble)
+## v3.2 — EQ (Bass + Treble) ✅ *(implemented with v3 redesign)*
 Per-track `BiquadFilterNode` pair: low-shelf + high-shelf. Bass ±12 dB, Treble ±12 dB. Port `lowShelfBiquad()` / `highShelfBiquad()` coefficient formulas from `../Vocoder/index.html` as a reference for the filter parameters.
 
 ---
 
-## v3.3 — Distortion / Grit
+## v3.3 — Distortion / Grit ✅ *(implemented with v3 redesign)*
 Per-track `WaveShaperNode` with a tanh-based curve. Port the grit curve generation from `applyGrit()` in `../Noise/app.js`. Control: Grit amount (0–1).
+
+---
+
+## v3 UI Redesign ✅
+Track header compacted to name + [M][S][FX] + Vol only. All four effects (EQ, Grit, Delay, Reverb) moved into a collapsible **FX strip** below each track's piano roll, opened/closed with the [FX] button. Effects sit in a horizontal row of blocks. Full signal chain: `fxIn → EQ → Grit → Delay → Reverb → trackGain → master`.
 
 ---
 
