@@ -527,16 +527,33 @@ function drawNotes(ctx, notes, color, rowH) {
   const CW = colWidth();
   const CB = cellBeats();
   notes.forEach(n => {
-    const row = pitchToRow(n.pitch);
-    const x   = KEYS_W + (n.start / CB) * CW + 1;
-    const y   = RULER_H + row * rowH + 1;
-    const w   = (n.duration / CB) * CW - 2;
-    const h   = rowH - 2;
-    ctx.fillStyle = color + '26';
+    const vel  = (n.velocity ?? 100) / 127;
+    const row  = pitchToRow(n.pitch);
+    const x    = KEYS_W + (n.start / CB) * CW + 1;
+    const y    = RULER_H + row * rowH + 1;
+    const w    = (n.duration / CB) * CW - 2;
+    const h    = rowH - 2;
+
+    // Dim background body
+    ctx.fillStyle = color + '18';
     ctx.fillRect(x, y, w, h);
+
+    // Velocity fill — rises from bottom, height proportional to velocity
+    const fillH = Math.max(2, Math.round(h * vel));
+    const fillY = y + h - fillH;
+    ctx.fillStyle = color + '45';
+    ctx.fillRect(x, fillY, w, fillH);
+
+    // Bright level line at top of the fill (the readable indicator)
+    ctx.fillStyle = color + 'dd';
+    ctx.fillRect(x, fillY, w, 2);
+
+    // Left accent bar — always solid
     ctx.fillStyle = color;
     ctx.fillRect(x, y, Math.min(3, w), h);
-    ctx.strokeStyle = color + 'b3';
+
+    // Outer border
+    ctx.strokeStyle = color + '70';
     ctx.lineWidth = 1;
     ctx.strokeRect(x, y, w, h);
   });
@@ -600,7 +617,7 @@ function ensureAudio() {
 
 const PEAK_GAIN = 0.22;
 
-function scheduleEnvelope(env, t, dur) {
+function scheduleEnvelope(env, t, dur, peakGain = PEAK_GAIN) {
   const A    = state.attack  / 1000;
   const D    = state.decay   / 1000;
   const S    = state.sustain;
@@ -611,14 +628,14 @@ function scheduleEnvelope(env, t, dur) {
 
   env.gain.setValueAtTime(0, t);
   if (tA >= tEnd) {
-    env.gain.linearRampToValueAtTime(PEAK_GAIN * (dur / A), tEnd);
+    env.gain.linearRampToValueAtTime(peakGain * (dur / A), tEnd);
   } else {
-    env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);
+    env.gain.linearRampToValueAtTime(peakGain, tA);
     if (tD >= tEnd) {
-      env.gain.linearRampToValueAtTime(PEAK_GAIN * (1 - ((tEnd - tA) / D) * (1 - S)), tEnd);
+      env.gain.linearRampToValueAtTime(peakGain * (1 - ((tEnd - tA) / D) * (1 - S)), tEnd);
     } else {
-      env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);
-      env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);
+      env.gain.linearRampToValueAtTime(S * peakGain, tD);
+      env.gain.setValueAtTime(S * peakGain, tEnd);
     }
   }
   env.gain.linearRampToValueAtTime(0, tEnd + R);
@@ -626,13 +643,14 @@ function scheduleEnvelope(env, t, dur) {
 }
 
 function fireNote(note, t, destGain) {
-  const dur = note.duration * secPerBeat();
+  const dur       = note.duration * secPerBeat();
+  const velGain   = PEAK_GAIN * ((note.velocity ?? 100) / 127);
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
   osc.type = state.waveform;
   osc.frequency.value = midiToHz(note.pitch);
   osc.connect(env); env.connect(destGain);
-  const stopAt = scheduleEnvelope(env, t, dur);
+  const stopAt = scheduleEnvelope(env, t, dur, velGain);
   osc.start(t); osc.stop(stopAt);
 }
 
@@ -723,24 +741,44 @@ function addTrackEvents(ti) {
     const idx    = notes.findIndex(n => n.pitch === pitch && beat >= n.start && beat < n.start + n.duration);
 
     if (idx >= 0) {
-      notes.splice(idx, 1); drag = null;
+      // Existing note — wait to see if it's a click (delete) or vertical drag (velocity)
+      drag = { type: 'vel', note: notes[idx], idx, startY: e.clientY,
+               startVel: notes[idx].velocity ?? 100, moved: false };
     } else {
-      const note = { pitch, start: col * cellBeats(), duration: cellBeats() };
+      const note = { pitch, start: col * cellBeats(), duration: cellBeats(), velocity: 100 };
       notes.push(note);
-      drag = { note, startCol: col };
+      drag = { type: 'place', note, startCol: col };
     }
     drawTrack(ti);
   });
 
   canvas.addEventListener('mousemove', e => {
     if (!drag || !(e.buttons & 1)) { drag = null; return; }
-    const [x] = relXY(e);
-    const col = Math.min(Math.max(Math.floor((x - KEYS_W) / colWidth()), drag.startCol), numCols() - 1);
-    drag.note.duration = (col - drag.startCol + 1) * cellBeats();
+
+    if (drag.type === 'place') {
+      const [x] = relXY(e);
+      const col = Math.min(Math.max(Math.floor((x - KEYS_W) / colWidth()), drag.startCol), numCols() - 1);
+      drag.note.duration = (col - drag.startCol + 1) * cellBeats();
+
+    } else if (drag.type === 'vel') {
+      const dy = drag.startY - e.clientY; // up = positive = louder
+      if (Math.abs(dy) > 3) drag.moved = true;
+      if (drag.moved) {
+        // 1px ≈ 1 velocity unit
+        drag.note.velocity = Math.max(1, Math.min(127, Math.round(drag.startVel + dy)));
+      }
+    }
     drawTrack(ti);
   });
 
-  canvas.addEventListener('mouseup',    () => { drag = null; });
+  canvas.addEventListener('mouseup', () => {
+    // If user clicked an existing note without dragging, delete it
+    if (drag?.type === 'vel' && !drag.moved) {
+      state.tracks[ti].notes.splice(drag.idx, 1);
+      drawTrack(ti);
+    }
+    drag = null;
+  });
   canvas.addEventListener('mouseleave', () => { drag = null; });
 }
 
@@ -801,7 +839,7 @@ async function exportAudio() {
         const env = offCtx.createGain();
         osc.type = state.waveform; osc.frequency.value = midiToHz(note.pitch);
         osc.connect(env); env.connect(tg);
-        const stopAt = scheduleEnvelope(env, t, dur);
+        const stopAt = scheduleEnvelope(env, t, dur, PEAK_GAIN * ((note.velocity ?? 100) / 127));
         osc.start(t); osc.stop(stopAt);
       });
     });

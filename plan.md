@@ -29,7 +29,7 @@ Stack 3 independent tracks, each with its own piano roll canvas, mute button, so
 
 ---
 
-## v2.1 — Note Velocity
+## v2.1 — Note Velocity ✅
 Click-drag **vertically** on a placed note to set its velocity (0–127). Notes rendered with opacity proportional to velocity. `fireNote()` scales gain by velocity.
 
 ---
