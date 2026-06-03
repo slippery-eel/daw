@@ -358,15 +358,16 @@ function ensureAudio() {
 const PEAK_GAIN = 0.5;
 
 function fireNote(note, t) {
-  const dur = note.duration * secPerBeat();
-  const A   = state.attack  / 1000;
-  const D   = state.decay   / 1000;
-  const S   = state.sustain;
-  const R   = state.release / 1000;
+  const dur  = note.duration * secPerBeat();
+  const A    = state.attack  / 1000;
+  const D    = state.decay   / 1000;
+  const S    = state.sustain;
+  const R    = state.release / 1000;
+  const tEnd = t + dur;
 
-  const tA   = t + Math.min(A, dur);               // end of attack
-  const tD   = Math.min(tA + D, t + dur);           // end of decay (clamped to gate)
-  const tEnd = t + dur;                             // note-off / start of release
+  // Unclamped phase end times — we decide per-phase whether each fits
+  const tA = t + A;
+  const tD = tA + D;
 
   const osc = audioCtx.createOscillator();
   const env = audioCtx.createGain();
@@ -375,10 +376,24 @@ function fireNote(note, t) {
   osc.connect(env); env.connect(masterGain);
 
   env.gain.setValueAtTime(0, t);
-  env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);           // attack
-  env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);       // decay → sustain
-  env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);              // hold sustain
-  env.gain.linearRampToValueAtTime(0, tEnd + R);             // release
+
+  if (tA >= tEnd) {
+    // Attack alone overruns the note: ramp to a partial peak at tEnd
+    env.gain.linearRampToValueAtTime(PEAK_GAIN * (dur / A), tEnd);
+  } else {
+    env.gain.linearRampToValueAtTime(PEAK_GAIN, tA);          // full attack
+    if (tD >= tEnd) {
+      // Decay overruns: interpolate decay value at note-off (no extra point needed)
+      const decayFraction = (tEnd - tA) / D;
+      const gainAtEnd = PEAK_GAIN * (1 - decayFraction * (1 - S));
+      env.gain.linearRampToValueAtTime(gainAtEnd, tEnd);
+    } else {
+      env.gain.linearRampToValueAtTime(S * PEAK_GAIN, tD);    // full decay
+      env.gain.setValueAtTime(S * PEAK_GAIN, tEnd);           // anchor sustain for release
+    }
+  }
+
+  env.gain.linearRampToValueAtTime(0, tEnd + R);              // release
 
   osc.start(t);
   osc.stop(tEnd + R + 0.01);
